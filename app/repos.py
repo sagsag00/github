@@ -57,6 +57,21 @@ def generate_commit_hash(message: str, author_id: int, timestamp: datetime) -> s
     data = f"{message}|{author_id}|{timestamp.isoformat()}"
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
+def get_user(user_id: int, db: Session) -> User:
+    """Gets a user using an id
+    
+    Raises exception if user not found
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+        
+    return user
+
 def get_repo(repo_id: int, db: Session) -> Repository:
     """Gets a repo using an id
     
@@ -136,6 +151,7 @@ def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Commit:
     return commit
 
 def copy_commits(source_branch: Branch, target_branch: Branch, db: Session):
+    """Copies the commits from source to target"""
     repo_id = source_branch.repo_id
     latest_commit_target = get_latest_commit(repo_id, target_branch.id, db)
 
@@ -179,7 +195,7 @@ def get_all_files(repo_id: int,
                   db: Session,
                   branch_id: Optional[int] = None,
                   commit_id: Optional[int] = None,
-                  ):
+                  ) -> List[File]:
     """Gets all files using `repo_id`.
     if `branch_id` or `commit_id` is provided, 
     returns all files that are a part of them
@@ -248,6 +264,31 @@ def get_pull_request(repo_id: int, pr_id: int, db: Session) -> PullRequest:
         
     return pr
 
+def get_collaborator(repo_id: int, db: Session, user_id: int) -> Union[Collaborator, List[Collaborator]]:
+    """Gets a collaborator using an id
+    
+    Returns `Collaborator` when `user_id` is provided,
+    else returns all issues matching `repo_id`
+    
+    Raises exception if collaborator not found
+    """
+    if not user_id:
+        return db.query(Collaborator).filter(
+            Collaborator.repo_id == repo_id
+        ).all()
+        
+    collaborator = db.query(Collaborator).filter(
+        Collaborator.repo_id == repo_id,
+        Collaborator.id == user_id
+    ).first()
+    if not collaborator:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Collaborator not found"
+        )
+        
+    return collaborator
+    
 @router.post("/", response_model=RepositoryResponse)
 @limiter.limit("50/hour")
 def create_repository(request: Request, repo_data: RepositoryCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -333,6 +374,7 @@ def update_repository(repo_id: int, repo_data: RepositoryUpdate,
         repo.is_private = repo_data.is_private
         
     if repo_data.default_branch is not None:
+        # Verify the branch exists
         get_branch(repo_id, db, name=repo_data.default_branch)
         repo.default_branch = repo_data.default_branch
     
@@ -414,7 +456,7 @@ def create_branch(repo_id: int,
     return new_branch
     
 @router.get("/{repo_id}/branches", response_model=List[BranchResponse])
-def list_branches(repo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_branches(repo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Branch]:
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "read", db)
     return get_branch(repo_id, db)
@@ -427,7 +469,7 @@ def delete_branch(repo_id: int, branch_id: int,
                   db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "write", db)
-    branch = get_branch(repo_id, db, branch_id=branch_id)
+    branch: Branch = get_branch(repo_id, db, branch_id=branch_id)
     if branch.name == repo.default_branch:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -447,7 +489,8 @@ def create_commit(repo_id: int,
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "write", db)
     commit_hash = generate_commit_hash(commit_data.message, user.id, datetime.utcnow())
-    branch = get_branch(repo_id, db, branch_id=commit_data.branch_id)
+    # Verify branch exists
+    get_branch(repo_id, db, branch_id=commit_data.branch_id)
     last_commit = get_latest_commit(repo_id, commit_data.branch_id, db)
     
     commit = Commit(
@@ -531,7 +574,7 @@ def list_issues(repo_id: int, status: Optional[str],
                 db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "read", db)
-    issues = get_issue(repo_id, db).order_by(Issue.status)
+    issues: List[Issue] = get_issue(repo_id, db).order_by(Issue.status)
     return issues
 
 @router.put("/{repo_id}/issues/{issue_id}", response_model=IssueResponse)
@@ -543,7 +586,7 @@ def update_issue(repo_id: int, issue_id: int,
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "write", db)
     
-    issue = get_issue(repo_id, db, issue_id=issue_id)
+    issue: Issue = get_issue(repo_id, db, issue_id=issue_id)
     if issue_data.title is not None:
         issue.title = issue_data.title
     
@@ -569,7 +612,9 @@ def add_comment(repo_id: int, issue_id: int, comment_data: IssueCommentCreate,
                 db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "read", db)
-    issue = get_issue(repo_id, db, issue_id)
+    
+    # Verify the issue exists
+    get_issue(repo_id, db, issue_id)
     
     comment = IssueComment(
         content = comment_data.content,
@@ -592,8 +637,8 @@ def create_pull_request(repo_id: int, pr_data: PullRequestCreate,
     check_repo_access(repo, user, "write", db)
     
     # Verifies that branches exist
-    source_branch = get_branch(repo_id, db, branch_id=pr_data.source_branch_id)
-    target_branch = get_branch(repo_id, db, branch_id=pr_data.target_branch_id)
+    get_branch(repo_id, db, branch_id=pr_data.source_branch_id) # Source
+    get_branch(repo_id, db, branch_id=pr_data.target_branch_id) # Target
     
     pr = PullRequest(
         title = pr_data.title,
@@ -623,8 +668,8 @@ def merge_pull_request(repo_id: int, pr_id: int,
             detail="Pull request is not open"
         )
         
-    source_branch = get_branch(repo_id, db, branch_id=pr.source_branch_id)
-    target_branch = get_branch(repo_id, db, branch_id=pr.target_branch_id)
+    source_branch: Branch = get_branch(repo_id, db, branch_id=pr.source_branch_id) 
+    target_branch: Branch = get_branch(repo_id, db, branch_id=pr.target_branch_id)
     
     copy_commits(source_branch, target_branch, db)
     
@@ -636,3 +681,47 @@ def merge_pull_request(repo_id: int, pr_id: int,
     
     return {"status": "ok"}
 
+@router.post("/{repo_id}/collaborators", response_model=CollaboratorResponse)
+def add_collaborator(repo_id: int, collab_data: CollaboratorAdd,
+                     user: User = Depends(get_current_user),
+                     csrf: bool = Depends(verify_csrf),
+                     db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "admin", db)
+    
+    # Verify user exists
+    user = get_user(collab_data.user_id, db)
+    
+    collaborator = Collaborator(
+        user_id = user.id,
+        repo_id = repo_id,
+        permission_level = collab_data.permission_level,
+    )
+    
+    db.add(collaborator)
+    db.commit()
+    db.refresh(collaborator)
+    
+    return collaborator
+
+@router.delete("/{repo_id}/collaborators/{user_id}")
+def remove_collaborator(repo_id: int, user_id: int, 
+                        user: User = Depends(get_current_user),
+                        csrf: bool = Depends(verify_csrf),
+                        db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "admin", db)
+    user = get_user(user_id, db)
+    db.delete(user)
+    db.commit()
+    
+    return {"status": "ok"}
+
+@router.get("/{repo_id}/collaborators", response_model=List[CollaboratorResponse])
+def list_collaborators(repo_id: int,
+                       user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    collaborators: List[Collaborator] = get_collaborator(repo_id, db)
+    return collaborators
