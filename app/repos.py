@@ -8,7 +8,7 @@ import hashlib
 from typing import List, Optional, Union
 
 from database import get_db
-from models import Repository, Branch, File, Issue, IssueComment, PullRequest, Collaborator, User
+from models import Repository, Branch, File, Issue, IssueComment, PullRequest, Collaborator, User, Commit
 from schemas import (RepositoryCreate, RepositoryUpdate, RepositoryResponse,
                      BranchCreate, BranchResponse, CommitCreate, CommitResponse,
                      CollaboratorAdd, CollaboratorResponse, FileChange, FileResponse,
@@ -100,6 +100,84 @@ def get_branch(repo_id: int, db: Session, branch_id: Optional[int] = None, name:
             detail="Branch not found"
         )  
     return branch
+
+def _get_commit(repo_id: int, commit_id: int, db: Session) -> Commit:
+    """Gets the commit with the provided id
+    
+    Raises exception if no commit has been found
+    """
+    commit = db.query(Commit).filter(
+        Commit.repository_id == repo_id,
+        Commit.id == commit_id
+    ).first()
+    if not commit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Couldn't find any commit with the povided id"
+        )
+        
+    return commit
+
+def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Commit:
+    """Gets the latest commit of a branch.
+    
+    Raises exception if no commit has been found
+    """
+    commit = db.query(Commit).filter(
+        Commit.repository_id == repo_id,
+        Commit.branch_id == branch_id
+        ).order_by(Commit.created_at.desc()).first()
+    
+    if not commit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Commit not found"
+        ) 
+    return commit
+
+def _get_file(repo_id: int, file_id: int, db: Session) -> File:
+    """Gets the file with the provided id
+    
+    Raises exception if the file doesn't exist
+    """
+    file = db.query(File).filter(
+        File.repo_id == repo_id,
+        File.id == file_id
+    ).first()
+    
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+        
+    return file
+
+def get_all_files(repo_id: int,
+                  db: Session,
+                  branch_id: Optional[int] = None,
+                  commit_id: Optional[int] = None,
+                  ):
+    if not branch_id and not commit_id:
+        files = db.query(Repository).filter(
+            Repository.id == repo_id
+        ).first().files
+        return files
+    
+    if commit_id:
+        files = db.query(File).filter(
+            File.repo_id == repo_id,
+            File.commit_id == commit_id
+        ).all()
+        return files
+    
+    last_commit = get_latest_commit(repo_id, branch_id, db)
+    files = db.query(File).filter(
+        File.repo_id == repo_id,
+        File.commit_id == last_commit.id
+    )
+    
+    return files
 
 @router.post("/", response_model=RepositoryResponse)
 @limiter.limit("50/hour")
@@ -290,3 +368,91 @@ def delete_branch(repo_id: int, branch_id: int,
     db.commit()
     
     return {"status": "ok"}
+
+@router.post("/{repo_id}/commits", response_model=CommitResponse)
+def create_commit(repo_id: int,
+                  commit_data: CommitCreate,
+                  user: User = Depends(get_current_user),
+                  csrf: bool = Depends(verify_csrf),
+                  db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    commit_hash = generate_commit_hash(commit_data.message, user.id, datetime.utcnow())
+    branch = get_branch(repo_id, db, branch_id=commit_data.branch_id)
+    last_commit = get_latest_commit(repo_id, commit_data.branch_id, db)
+    
+    commit = Commit(
+        message = commit_data.message,
+        author_id = user.id,
+        repository_id = repo_id,
+        branch_id = commit_data.branch_id,
+        parent_commit_id = last_commit.id,
+        commit_hash = commit_hash,
+    )
+    
+    db.add(commit)
+    db.commit()
+    db.refresh(commit)
+    
+    return commit
+
+@router.get("/{repo_id}/commits", response_model=List[CommitResponse])
+def list_commits(repo_id: int, branch_id: Optional[int],
+                 user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)
+                ):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    commits = db.query(Commit).filter(
+        Commit.repository_id == repo_id,
+        Commit.branch_id == branch_id
+    ).order_by(Commit.created_at.desc()).all()
+    return commits
+
+@router.get("{repo_id}/commits/{commit_id}", response_model=CommitResponse)
+def get_commit(repo_id: int, commit_id: int,
+               user: User = Depends(get_current_user),
+               db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    commit = _get_commit(repo_id, commit_id, db)
+    return commit
+
+@router.get("/{repo_id}/files/{file_id}", response_model=FileResponse)
+def get_file(repo_id: int, file_id: int,
+             user: User = Depends(get_current_user),
+             db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    return _get_file(repo_id, file_id, db)
+
+@router.get("/{repo_id}/commits/{commit_id}/files", response_model=List[FileResponse])
+def list_commit_files(repo_id: int, commit_id: int,
+                      user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    files = get_all_files(repo_id, db, commit_id=commit_id)
+    return files
+
+@router.post("/{repo_id}/issues", response_model=IssueResponse)
+def create_issue(repo_id: int, issue_data: IssueCreate,
+                 user: User = Depends(get_current_user),
+                 csrf: bool = Depends(verify_csrf),
+                 db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    issue = Issue(
+        title = issue_data.title,
+        description = issue_data.description,
+        author_id = user.id,
+        repo_id = repo_id,
+        assigned_to_id = issue_data.assigned_to_id
+    )
+    
+    db.add(issue)
+    db.commit()
+    db.refresh(issue)
+    
+    return issue
+
