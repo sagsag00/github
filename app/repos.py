@@ -39,7 +39,7 @@ def check_repo_access(repo: Repository, user: User, required_permission: str, db
     
     if not collaborator:
         raise HTTPException(
-            status_code=status.HTTP_403_UNAUTHORIZED,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied"
         )
         
@@ -133,7 +133,7 @@ def _get_commit(repo_id: int, commit_id: int, db: Session) -> Commit:
         
     return commit
 
-def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Commit:
+def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Union[Commit, None]:
     """Gets the latest commit of a branch.
     
     Raises exception if no commit has been found
@@ -143,11 +143,6 @@ def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Commit:
         Commit.branch_id == branch_id
         ).order_by(Commit.created_at.desc()).first()
     
-    if not commit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Commit not found"
-        ) 
     return commit
 
 def copy_commits(source_branch: Branch, target_branch: Branch, db: Session):
@@ -168,7 +163,7 @@ def copy_commits(source_branch: Branch, target_branch: Branch, db: Session):
             author_id=commit.author_id,
             parent_commit_id=latest_commit_target.id if latest_commit_target else None,
             created_at=datetime.utcnow(),
-            hash=generate_commit_hash(commit.message, commit.author_id, datetime.utcnow())
+            commit_hash=generate_commit_hash(commit.message, commit.author_id, datetime.utcnow())
         )
         db.add(new_commit)
         latest_commit_target = new_commit
@@ -254,7 +249,7 @@ def get_pull_request(repo_id: int, pr_id: int, db: Session) -> PullRequest:
     pr = db.query(PullRequest).filter(
         PullRequest.id == pr_id,
         PullRequest.repo_id == repo_id
-    )
+    ).first()
     
     if not pr:
         raise HTTPException(
@@ -264,7 +259,7 @@ def get_pull_request(repo_id: int, pr_id: int, db: Session) -> PullRequest:
         
     return pr
 
-def get_collaborator(repo_id: int, db: Session, user_id: int) -> Union[Collaborator, List[Collaborator]]:
+def get_collaborator(repo_id: int, db: Session, user_id: Optional[int] = None) -> Union[Collaborator, List[Collaborator]]:
     """Gets a collaborator using an id
     
     Returns `Collaborator` when `user_id` is provided,
@@ -279,7 +274,7 @@ def get_collaborator(repo_id: int, db: Session, user_id: int) -> Union[Collabora
         
     collaborator = db.query(Collaborator).filter(
         Collaborator.repo_id == repo_id,
-        Collaborator.id == user_id
+        Collaborator.user_id == user_id
     ).first()
     if not collaborator:
         raise HTTPException(
@@ -303,7 +298,7 @@ def create_repository(request: Request, repo_data: RepositoryCreate, user: User 
     if db.query(Repository).filter(
         Repository.owner_id == user.id,
         Repository.name == repo_data.name
-        ):
+        ).first():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"You already have a repository with the name \"{repo_data.name}\""
@@ -313,12 +308,20 @@ def create_repository(request: Request, repo_data: RepositoryCreate, user: User 
         name=repo_data.name,
         description=repo_data.description,
         is_private=repo_data.is_private,
-        default_branch=repo_data.default_branch
+        default_branch=repo_data.default_branch,
+        owner_id=user.id
     )
     
     db.add(new_repo)
     db.commit()
     db.refresh(new_repo)
+    
+    default_branch = Branch(
+        name=new_repo.default_branch,
+        repo_id=new_repo.id
+    )
+    db.add(default_branch)
+    db.commit()
     
     return new_repo
 
@@ -386,8 +389,9 @@ def update_repository(repo_id: int, repo_data: RepositoryUpdate,
     return repo
     
 @router.delete("/{repo_id}")
-@limiter.limiter("100/hour")
+@limiter.limit("100/hour")
 def delete_repository(repo_id: int,
+                      request: Request,
                       user: User = Depends(get_current_user),
                       csrf: bool = Depends(verify_csrf),
                       db: Session = Depends(get_db)
@@ -409,6 +413,7 @@ def delete_repository(repo_id: int,
 @limiter.limit("30/hour")
 def create_branch(repo_id: int,
                   branch_data: BranchCreate,
+                  request: Request,
                   user: User = Depends(get_current_user),
                   csrf: bool = Depends(verify_csrf),
                   db: Session = Depends(get_db)):
@@ -462,8 +467,9 @@ def list_branches(repo_id: int, user: User = Depends(get_current_user), db: Sess
     return get_branch(repo_id, db)
 
 @router.delete("/{repo_id}/branches/{branch_id}")
-@limiter.limiter("20/hour")
+@limiter.limit("20/hour")
 def delete_branch(repo_id: int, branch_id: int,
+                  request: Request,
                   user: User = Depends(get_current_user),
                   csrf: bool = Depends(verify_csrf),
                   db: Session = Depends(get_db)):
@@ -481,8 +487,10 @@ def delete_branch(repo_id: int, branch_id: int,
     return {"status": "ok"}
 
 @router.post("/{repo_id}/commits", response_model=CommitResponse)
+@limiter.limit("100/hour")
 def create_commit(repo_id: int,
                   commit_data: CommitCreate,
+                  request: Request,
                   user: User = Depends(get_current_user),
                   csrf: bool = Depends(verify_csrf),
                   db: Session = Depends(get_db)):
@@ -498,13 +506,38 @@ def create_commit(repo_id: int,
         author_id = user.id,
         repository_id = repo_id,
         branch_id = commit_data.branch_id,
-        parent_commit_id = last_commit.id,
+        parent_commit_id = last_commit.id if last_commit else None,
         commit_hash = commit_hash,
     )
     
     db.add(commit)
     db.commit()
     db.refresh(commit)
+    
+    for file_change in commit_data.files:
+        if file_change.action == "add" or file_change.action == "modify":
+            file = File(
+                filename=file_change.filepath.split('/')[-1],
+                filepath=file_change.filepath,
+                content=file_change.content,
+                file_size=len(file_change.content),
+                repo_id=repo_id,
+                commit_id=commit.id
+            )
+            db.add(file)
+        elif file_change.action == "delete":
+            existing_file = db.query(File).filter(
+                File.repo_id == repo_id,
+                File.filepath == file_change.filepath
+            ).first()
+            if existing_file:
+                db.delete(existing_file)
+                
+    db.commit()
+    
+    branch = get_branch(repo_id, db, branch_id=commit_data.branch_id)
+    branch.last_commit_id = commit.id
+    db.commit()
     
     return commit
 
@@ -515,13 +548,20 @@ def list_commits(repo_id: int, branch_id: Optional[int],
                 ):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "read", db)
-    commits = db.query(Commit).filter(
-        Commit.repository_id == repo_id,
-        Commit.branch_id == branch_id
-    ).order_by(Commit.created_at.desc()).all()
+    
+    if branch_id:
+        commits = db.query(Commit).filter(
+            Commit.repository_id == repo_id,
+            Commit.branch_id == branch_id
+        ).order_by(Commit.created_at.desc()).all()
+    else:
+        commits = db.query(Commit).filter(
+            Commit.repository_id == repo_id
+        ).order_by(Commit.created_at.desc()).all()
+    
     return commits
 
-@router.get("{repo_id}/commits/{commit_id}", response_model=CommitResponse)
+@router.get("/{repo_id}/commits/{commit_id}", response_model=CommitResponse)
 def get_commit(repo_id: int, commit_id: int,
                user: User = Depends(get_current_user),
                db: Session = Depends(get_db)):
@@ -574,7 +614,12 @@ def list_issues(repo_id: int, status: Optional[str],
                 db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "read", db)
-    issues: List[Issue] = get_issue(repo_id, db).order_by(Issue.status)
+    issues = db.query(Issue).filter(
+        Issue.repo_id == repo_id
+    )
+    if status:
+        issues = issues.filter(Issue.status == status)
+    issues = issues.order_by(Issue.created_at.desc()).all()
     return issues
 
 @router.put("/{repo_id}/issues/{issue_id}", response_model=IssueResponse)
@@ -711,8 +756,8 @@ def remove_collaborator(repo_id: int, user_id: int,
                         db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "admin", db)
-    user = get_user(user_id, db)
-    db.delete(user)
+    collaborator = get_collaborator(repo_id, db, user_id)
+    db.delete(collaborator)
     db.commit()
     
     return {"status": "ok"}
