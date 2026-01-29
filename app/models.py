@@ -152,7 +152,7 @@ class File(Base):
     repo_id = Column(Integer, ForeignKey("repositories.id"), nullable=False)
     commit_id = Column(Integer, ForeignKey("commits.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     repository = relationship("Repository", back_populates="files")
     commit = relationship("Commit", back_populates="files")
@@ -168,7 +168,7 @@ class Issue(Base):
     repo_id = Column(Integer, ForeignKey("repositories.id"))
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
     
     author = relationship("User", foreign_keys=[author_id])
@@ -190,7 +190,7 @@ class IssueComment(Base):
     author_id = Column(Integer, ForeignKey("users.id"))
     issue_id = Column(Integer, ForeignKey("issues.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     author = relationship("User")
     issue = relationship("Issue", back_populates="comments")
@@ -207,7 +207,7 @@ class PullRequest(Base):
     source_branch_id = Column(Integer, ForeignKey("branches.id"))
     target_branch_id = Column(Integer, ForeignKey("branches.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     merged_at = Column(DateTime, nullable=True)
     
     author = relationship("User")

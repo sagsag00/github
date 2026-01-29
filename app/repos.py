@@ -158,6 +158,10 @@ def get_all_files(repo_id: int,
                   branch_id: Optional[int] = None,
                   commit_id: Optional[int] = None,
                   ):
+    """Gets all files using `repo_id`.
+    if `branch_id` or `commit_id` is provided, 
+    returns all files that are a part of them
+    """
     if not branch_id and not commit_id:
         files = db.query(Repository).filter(
             Repository.id == repo_id
@@ -178,6 +182,31 @@ def get_all_files(repo_id: int,
     )
     
     return files
+
+def get_issue(repo_id: int, db: Session, issue_id: Optional[int]) -> Union[Issue, List[Issue]]:
+    """Gets an issue using an id
+    
+    Returns `Issue` when `issue_id` is provided,
+    else returns all issues matching `repo_id`
+    
+    Raises exception if issue not found
+    """
+    if not issue_id:
+        return db.query(Issue).filter(
+            Issue.repo_id == repo_id
+        ).all()
+        
+    issue = db.query(Issue).filter(
+        Issue.repo_id == repo_id,
+        Issue.id == issue_id
+    ).first()
+    if not issue:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Issue not found"
+        )
+        
+    return issue
 
 @router.post("/", response_model=RepositoryResponse)
 @limiter.limit("50/hour")
@@ -455,4 +484,62 @@ def create_issue(repo_id: int, issue_data: IssueCreate,
     db.refresh(issue)
     
     return issue
+
+@router.get("/{repo_id}/issues", response_model=List[IssueResponse])
+def list_issues(repo_id: int, status: Optional[str],
+                user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    issues = get_issue(repo_id, db).order_by(Issue.status)
+    return issues
+
+@router.put("/{repo_id}/issues/{issue_id}", response_model=IssueResponse)
+def update_issue(repo_id: int, issue_id: int,
+                 issue_data: IssueUpdate, 
+                 user: User = Depends(get_current_user),
+                 csrf: bool = Depends(verify_csrf),
+                 db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    
+    issue = get_issue(repo_id, db, issue_id=issue_id)
+    if issue_data.title is not None:
+        issue.title = issue_data.title
+    
+    if issue_data.description is not None:
+        issue.description = issue_data.description
+        
+    if issue_data.status is not None:
+        if issue_data.status == "closed":
+            issue.closed_at = datetime.utcnow()
+        issue.status = issue_data.status
+    
+    if issue_data.assigned_to_id is not None:
+        issue.assigned_to_id = issue_data.assigned_to_id
+        
+    db.commit()
+    db.refresh(issue)
+    return issue
+
+@router.post("/{repo_id}/issues/{issue_id}/comments", response_model=IssueCommentResponse)
+def add_comment(repo_id: int, issue_id: int, comment_data: IssueCommentCreate,
+                user: User = Depends(get_current_user),
+                csrf: bool = Depends(verify_csrf),
+                db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    issue = get_issue(repo_id, db, issue_id)
+    
+    comment = IssueComment(
+        content = comment_data.content,
+        author_id = user.id,
+        issue_id = issue_id
+    )
+    
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+    
+    return comment
 
