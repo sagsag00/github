@@ -5,7 +5,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import hashlib
-from typing import List
+from typing import List, Optional, Union
 
 from database import get_db
 from models import Repository, Branch, File, Issue, IssueComment, PullRequest, Collaborator, User
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/repos", tags=["repositories"])
 
 def check_repo_access(repo: Repository, user: User, required_permission: str, db: Session):
     """
-    `required_permission` can be: "read", "write" or "admin"
+    `required_permission` can be: "read", "write", "admin"
     
     Raises exceptions if permissions won't suffice.
     """
@@ -58,7 +58,10 @@ def generate_commit_hash(message: str, author_id: int, timestamp: datetime) -> s
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 def get_repo(repo_id: int, db: Session) -> Repository:
-    """Gets a repo using an id"""
+    """Gets a repo using an id
+    
+    Raises exception if repository not found
+    """
     repo = db.query(Repository).filter(Repository.id == repo_id).first()
     
     if not repo:
@@ -67,6 +70,36 @@ def get_repo(repo_id: int, db: Session) -> Repository:
             detail="Repository not found"
         )
     return repo
+
+def get_branch(repo_id: int, db: Session, branch_id: Optional[int] = None, name: Optional[str] = None) -> Union[Branch, List[Branch]]:
+    """Gets a branch using an id
+    
+    Returns `Branch` when `branch_id` or `name` is provided,
+    else returns all branches matching `repo_id`
+    
+    Raises exception if branch not found
+    """
+    if branch_id:
+        branch = db.query(Branch).filter(
+            Branch.repo_id == repo_id,
+            Branch.id == branch_id           
+            ).first()
+    elif name:
+        branch = db.query(Branch).filter(
+            Branch.repo_id == repo_id,
+            Branch.name == name           
+            ).first()
+    else:
+        return db.query(Branch).filter(
+            Branch.repo_id == repo_id
+        ).all()
+    
+    if not branch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found"
+        )  
+    return branch
 
 @router.post("/", response_model=RepositoryResponse)
 @limiter.limit("50/hour")
@@ -153,15 +186,7 @@ def update_repository(repo_id: int, repo_data: RepositoryUpdate,
         repo.is_private = repo_data.is_private
         
     if repo_data.default_branch is not None:
-        branch = db.query(Branch).filter(
-            Branch.repo_id == repo_id,
-            Branch.name == repo_data.default_branch
-        ).first()
-        if not branch:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Branch does not exist"
-            )
+        get_branch(repo_id, db, name=repo_data.default_branch)
         repo.default_branch = repo_data.default_branch
     
     repo.updated_at = datetime.utcnow()
@@ -172,13 +197,96 @@ def update_repository(repo_id: int, repo_data: RepositoryUpdate,
     return repo
     
 @router.delete("/{repo_id}")
+@limiter.limiter("100/hour")
 def delete_repository(repo_id: int,
                       user: User = Depends(get_current_user),
                       csrf: bool = Depends(verify_csrf),
                       db: Session = Depends(get_db)
                     ):
     repo = get_repo(repo_id, db)
-    check_repo_access(repo, user, "admin", db)
+    
+    if repo.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only repository owner can delete repository"
+        )
+    
     db.delete(repo)
     db.commit()
+    
+    return {"status": "ok"}
+
+@router.post("/{repo_id}/branches", response_model=BranchResponse)
+@limiter.limit("30/hour")
+def create_branch(repo_id: int,
+                  branch_data: BranchCreate,
+                  user: User = Depends(get_current_user),
+                  csrf: bool = Depends(verify_csrf),
+                  db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    
+    existing = (
+        db.query(Branch)
+        .filter(Branch.repo_id == repo_id, Branch.name == branch_data.name)
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="Branch with this name already exists"
+        )
+        
+    new_branch = Branch(
+        name=branch_data.name,
+        repo_id=repo_id
+    )
+
+    if branch_data.source_branch_id:
+        source_branch = (
+            db.query(Branch)
+            .filter(
+                Branch.id == branch_data.source_branch_id,
+                Branch.repo_id == repo_id
+            )
+            .first()
+        )
+        
+        if not source_branch:
+            raise HTTPException(
+                status_code=400,
+                detail="Source branch not found in repository"
+            )
+            
+        new_branch.last_commit_id = source_branch.last_commit_id
+        
+    db.add(new_branch)
+    db.commit()
+    db.refresh(new_branch)
+    
+    return new_branch
+    
+@router.get("/{repo_id}/branches", response_model=List[BranchResponse])
+def list_branches(repo_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "read", db)
+    return get_branch(repo_id, db)
+
+@router.delete("/{repo_id}/branches/{branch_id}")
+@limiter.limiter("20/hour")
+def delete_branch(repo_id: int, branch_id: int,
+                  user: User = Depends(get_current_user),
+                  csrf: bool = Depends(verify_csrf),
+                  db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    branch = get_branch(repo_id, db, branch_id=branch_id)
+    if branch.name == repo.default_branch:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete default branch"
+        )
+    db.delete(branch)
+    db.commit()
+    
     return {"status": "ok"}
