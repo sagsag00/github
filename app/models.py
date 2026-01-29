@@ -62,17 +62,43 @@ class Repository(Base):
     default_branch = Column(String, default="main")
     
     owner = relationship("User", back_populates="repositories")
-    branches = relationship("Branch")
+    
+    branches = relationship(
+        "Branch",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )
+    
     commits = relationship(
         "Commit",
         back_populates="repository",
         cascade="all, delete-orphan",
         order_by="Commit.created_at.desc()"
     )
-    files = relationship("File")
-    issues = relationship("Issue")
-    pull_requests = relationship("PullRequest")
-    collaborators = relationship("Collaborator")
+    
+    files = relationship(
+        "File",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )
+    
+    issues = relationship(
+        "Issue",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )
+    
+    pull_requests = relationship(
+        "PullRequest",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )
+    
+    collaborators = relationship(
+        "Collaborator",
+        back_populates="repository",
+        cascade="all, delete-orphan"
+    )
 
 class Branch(Base):
     __tablename__ = "branches"   
@@ -83,8 +109,13 @@ class Branch(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_commit_id = Column(Integer, ForeignKey("commits.id"), nullable=True)
     
-    repository = relationship("Repository")
-    commits = relationship("Commit", foreign_keys="[Commit.branch_id]") 
+    repository = relationship("Repository", back_populates="branches")
+    
+    commits = relationship(
+        "Commit",
+        back_populates="branch",
+        cascade="all, delete-orphan"
+    )
 
 class Commit(Base):
     __tablename__ = "commits"
@@ -98,15 +129,17 @@ class Commit(Base):
     commit_hash = Column(String, unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    author = relationship("User", foreign_keys=[author_id])
+    author = relationship("User")
     repository = relationship("Repository", back_populates="commits")
-    branch = relationship("Branch", foreign_keys=[branch_id])
+    branch = relationship("Branch", back_populates="commits")
+    
     files = relationship(
         "File",
-        back_populates="commits",
+        back_populates="commit",
         cascade="all, delete-orphan"
     )
-    parent = relationship("Commit", foreign_keys=[parent_commit_id])
+
+    parent = relationship("Commit", remote_side=[id])
     
 class File(Base):
     __tablename__ = "files"
@@ -121,8 +154,8 @@ class File(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
     
-    repository = relationship("Repository")
-    commits = relationship("Commit", back_populates="files")
+    repository = relationship("Repository", back_populates="files")
+    commit = relationship("Commit", back_populates="files")
     
 class Issue(Base):
     __tablename__ = "issues"
@@ -140,8 +173,14 @@ class Issue(Base):
     
     author = relationship("User", foreign_keys=[author_id])
     assigned_to = relationship("User", foreign_keys=[assigned_to_id])
-    repository = relationship("Repository")
-    comments = relationship("IssueComment")
+    
+    repository = relationship("Repository", back_populates="issues")
+    
+    comments = relationship(
+        "IssueComment",
+        back_populates="issue",
+        cascade="all, delete-orphan"
+    )
     
 class IssueComment(Base):
     __tablename__ = "issue_comments"
@@ -154,7 +193,7 @@ class IssueComment(Base):
     updated_at = Column(DateTime, default=datetime.utcnow)
     
     author = relationship("User")
-    issue = relationship("Issue")
+    issue = relationship("Issue", back_populates="comments")
     
 class PullRequest(Base):
     __tablename__ = "pull_requests"
@@ -172,7 +211,8 @@ class PullRequest(Base):
     merged_at = Column(DateTime, nullable=True)
     
     author = relationship("User")
-    repository = relationship("Repository")
+    repository = relationship("Repository", back_populates="pull_requests")
+    
     source_branch = relationship("Branch", foreign_keys=[source_branch_id])
     target_branch = relationship("Branch", foreign_keys=[target_branch_id])
     
@@ -189,4 +229,4 @@ class Collaborator(Base):
     added_at = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User")
-    repository = relationship("Repository")
+    repository = relationship("Repository", back_populates="collaborators")
