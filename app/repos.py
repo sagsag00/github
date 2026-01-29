@@ -135,6 +135,28 @@ def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Commit:
         ) 
     return commit
 
+def copy_commits(source_branch: Branch, target_branch: Branch, db: Session):
+    repo_id = source_branch.repo_id
+    latest_commit_target = get_latest_commit(repo_id, target_branch.id, db)
+
+    source_commits = db.query(Commit).filter(
+        Commit.repository_id == repo_id,
+        Commit.branch_id == source_branch.id,
+    ).order_by(Commit.created_at.asc(), Commit.id.asc()).all()
+    
+    for commit in source_commits:
+        new_commit = Commit(
+            repository_id = repo_id,
+            branch_id=target_branch.id,
+            message=commit.message,
+            author_id=commit.author_id,
+            parent_commit_id=latest_commit_target.id if latest_commit_target else None,
+            created_at=datetime.utcnow(),
+            hash=generate_commit_hash(commit.message, commit.author_id, datetime.utcnow())
+        )
+        db.add(new_commit)
+        latest_commit_target = new_commit
+
 def _get_file(repo_id: int, file_id: int, db: Session) -> File:
     """Gets the file with the provided id
     
@@ -207,6 +229,24 @@ def get_issue(repo_id: int, db: Session, issue_id: Optional[int]) -> Union[Issue
         )
         
     return issue
+
+def get_pull_request(repo_id: int, pr_id: int, db: Session) -> PullRequest:
+    """Gets the pull request with the provided id
+    
+    Raises exception if the pull request is not found
+    """
+    pr = db.query(PullRequest).filter(
+        PullRequest.id == pr_id,
+        PullRequest.repo_id == repo_id
+    )
+    
+    if not pr:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Pull request not found"
+        )
+        
+    return pr
 
 @router.post("/", response_model=RepositoryResponse)
 @limiter.limit("50/hour")
@@ -542,4 +582,57 @@ def add_comment(repo_id: int, issue_id: int, comment_data: IssueCommentCreate,
     db.refresh(comment)
     
     return comment
+
+@router.post("/{repo_id}/pull-requests", response_model=PullRequestResponse)
+def create_pull_request(repo_id: int, pr_data: PullRequestCreate,
+                        user: User = Depends(get_current_user),
+                        csrf: bool = Depends(verify_csrf),
+                        db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    
+    # Verifies that branches exist
+    source_branch = get_branch(repo_id, db, branch_id=pr_data.source_branch_id)
+    target_branch = get_branch(repo_id, db, branch_id=pr_data.target_branch_id)
+    
+    pr = PullRequest(
+        title = pr_data.title,
+        description = pr_data.description,
+        author_id = user.id,
+        repo_id = repo_id,
+        source_branch_id = pr_data.source_branch_id,
+        target_branch_id = pr_data.target_branch_id
+    )
+    
+    db.add(pr)
+    db.commit()
+    db.refresh(pr)
+    
+    return pr
+
+@router.post("/{repo_id}/pull-requests/{pr_id}/merge")
+def merge_pull_request(repo_id: int, pr_id: int,
+                       user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    repo = get_repo(repo_id, db)
+    check_repo_access(repo, user, "write", db)
+    pr = get_pull_request(repo_id, pr_id, db)
+    if not pr.status == "open":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Pull request is not open"
+        )
+        
+    source_branch = get_branch(repo_id, db, branch_id=pr.source_branch_id)
+    target_branch = get_branch(repo_id, db, branch_id=pr.target_branch_id)
+    
+    copy_commits(source_branch, target_branch, db)
+    
+    pr.status = "merged"
+    pr.merged_at = datetime.utcnow()
+    
+    db.commit()
+    db.refresh(pr)
+    
+    return {"status": "ok"}
 
