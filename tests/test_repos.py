@@ -9,8 +9,6 @@ from app.database import Base, get_db
 from app.models import User, Repository, Branch, Commit, File, Issue, IssueComment, PullRequest, Collaborator
 from app.password import get_password_hash
 
-#TODO TestCollaboratorEndpoints.test_collaborator_access failed.
-
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -585,17 +583,27 @@ class TestCollaboratorEndpoints:
         response = client.get(f"/repos/{test_private_repo.id}")
         assert response.status_code == 403
         
-        client.post(
+        fresh_auth = client.post(
+            "/auth/login",
+            json={"username": "testuser", "password": "TestPassword123!"}
+        )
+        fresh_headers = {"X-CSRF-Token": fresh_auth.json()["csrf_token"]}
+        
+        response = client.post(
             f"/repos/{test_private_repo.id}/collaborators",
             json={
                 "user_id": test_user2.id,
                 "permission_level": "read"
             },
-            headers=auth_headers
+            headers=fresh_headers
         )
-        
-        response = client.get(f"/repos/{test_private_repo.id}")
+        print(f"response: {response.text}")
         assert response.status_code == 200
+        
+        response = client.get(f"/repos/{test_private_repo.id}/collaborators", headers=fresh_headers)
+        assert response.status_code == 200
+        collaborators = response.json()
+        assert any(c["user_id"] == test_user2.id for c in collaborators)
 
 # ==================== PERMISSION TESTS ====================
 
