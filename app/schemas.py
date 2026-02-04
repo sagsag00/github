@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
@@ -16,8 +16,7 @@ class UserResponse(BaseModel):
     username: str
     email: EmailStr
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes = True)
         
 class TokenResponse(BaseModel):
     access_token: str
@@ -50,8 +49,7 @@ class RepositoryResponse(BaseModel):
     updated_at: datetime
     default_branch: str
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
     
 class BranchCreate(BaseModel):
     name: str
@@ -64,8 +62,7 @@ class BranchResponse(BaseModel):
     created_at: datetime
     last_commit_id: Optional[int]
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
 
 class FileChange(BaseModel):
     filepath: str
@@ -79,7 +76,7 @@ class CommitCreate(BaseModel):
     
 class CommitResponse(BaseModel):
     id: int
-    message: int
+    message: str
     author_id: int
     repo_id: int
     branch_id: int
@@ -87,8 +84,7 @@ class CommitResponse(BaseModel):
     created_at: datetime
     parent_commit_id: Optional[int]
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
 
 class FileResponse(BaseModel):
     id: int
@@ -101,8 +97,7 @@ class FileResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
         
 class IssueCreate(BaseModel):
     title: str
@@ -127,8 +122,7 @@ class IssueResponse(BaseModel):
     updated_at: datetime
     closed_at: Optional[datetime]
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
 
 class IssueCommentCreate(BaseModel):
     content: str
@@ -141,8 +135,7 @@ class IssueCommentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
         
 class PullRequestCreate(BaseModel):
     title: str
@@ -168,8 +161,7 @@ class PullRequestResponse(BaseModel):
     updated_at: datetime
     merged_at: Optional[datetime]
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)
         
 class CollaboratorAdd(BaseModel):
     user_id: int
@@ -182,5 +174,4 @@ class CollaboratorResponse(BaseModel):
     permission_level: str
     added_at: datetime
     
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes = True)

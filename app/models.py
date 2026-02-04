@@ -9,9 +9,11 @@ from sqlalchemy import (
     UniqueConstraint     
 )
 from sqlalchemy.orm import relationship
-from datetime import datetime
+import datetime
 
-from database import Base
+from app.database import Base
+
+utcnow = lambda: datetime.datetime.now(datetime.UTC)
 
 class User(Base):
     __tablename__ = "users"
@@ -20,7 +22,7 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
     
     repositories = relationship(
         "Repository",
@@ -35,7 +37,7 @@ class LoginAttempt(Base):
     username = Column(String, index=True, nullable=False)
     success = Column(Boolean, nullable=False)
     ip_address = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utcnow, index=True)
 
 
 class RevokedToken(Base):
@@ -43,7 +45,7 @@ class RevokedToken(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     jti = Column(String, unique=True, index=True, nullable=False)  # JWT ID
-    revoked_at = Column(DateTime, default=datetime.utcnow)
+    revoked_at = Column(DateTime, default=utcnow)
     expires_at = Column(DateTime, nullable=False, index=True)
     
 class Repository(Base):
@@ -57,8 +59,8 @@ class Repository(Base):
     description = Column(Text, default="")
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_private = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     default_branch = Column(String, default="main")
     
     owner = relationship("User", back_populates="repositories")
@@ -106,15 +108,18 @@ class Branch(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     repo_id = Column(Integer, ForeignKey("repositories.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_commit_id = Column(Integer, ForeignKey("commits.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    last_commit_id = Column(Integer,
+                            ForeignKey("commits.id", use_alter=True),
+                            nullable=True)
     
     repository = relationship("Repository", back_populates="branches")
     
     commits = relationship(
         "Commit",
         back_populates="branch",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        foreign_keys="Commit.branch_id"
     )
 
 class Commit(Base):
@@ -123,15 +128,15 @@ class Commit(Base):
     id = Column(Integer, primary_key=True, index=True)
     message = Column(String(255), nullable=False)
     author_id = Column(Integer, ForeignKey("users.id"))
-    repository_id = Column(Integer, ForeignKey("repositories.id"), nullable=False)
+    repo_id = Column(Integer, ForeignKey("repositories.id"), nullable=False)
     branch_id = Column(Integer, ForeignKey("branches.id"))
     parent_commit_id = Column(Integer, ForeignKey("commits.id"), nullable=True)
     commit_hash = Column(String, unique=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
     
     author = relationship("User")
     repository = relationship("Repository", back_populates="commits")
-    branch = relationship("Branch", back_populates="commits")
+    branch = relationship("Branch", back_populates="commits", foreign_keys=[branch_id])
     
     files = relationship(
         "File",
@@ -151,8 +156,8 @@ class File(Base):
     file_size = Column(Integer)
     repo_id = Column(Integer, ForeignKey("repositories.id"), nullable=False)
     commit_id = Column(Integer, ForeignKey("commits.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     
     repository = relationship("Repository", back_populates="files")
     commit = relationship("Commit", back_populates="files")
@@ -167,8 +172,8 @@ class Issue(Base):
     author_id = Column(Integer, ForeignKey("users.id"))
     repo_id = Column(Integer, ForeignKey("repositories.id"))
     assigned_to_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     closed_at = Column(DateTime, nullable=True)
     
     author = relationship("User", foreign_keys=[author_id])
@@ -189,8 +194,8 @@ class IssueComment(Base):
     content = Column(Text, nullable=False)
     author_id = Column(Integer, ForeignKey("users.id"))
     issue_id = Column(Integer, ForeignKey("issues.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     
     author = relationship("User")
     issue = relationship("Issue", back_populates="comments")
@@ -206,8 +211,8 @@ class PullRequest(Base):
     repo_id = Column(Integer, ForeignKey("repositories.id"))
     source_branch_id = Column(Integer, ForeignKey("branches.id"))
     target_branch_id = Column(Integer, ForeignKey("branches.id"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     merged_at = Column(DateTime, nullable=True)
     
     author = relationship("User")
@@ -226,7 +231,7 @@ class Collaborator(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     repo_id = Column(Integer, ForeignKey("repositories.id"))
     permission_level = Column(String, default="read")
-    added_at = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(DateTime, default=utcnow)
     
     user = relationship("User")
     repository = relationship("Repository", back_populates="collaborators")

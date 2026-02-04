@@ -1,21 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+import datetime
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import hashlib
 from typing import List, Optional, Union
 
-from database import get_db
-from models import Repository, Branch, File, Issue, IssueComment, PullRequest, Collaborator, User, Commit
-from schemas import (RepositoryCreate, RepositoryUpdate, RepositoryResponse,
+from app.database import get_db
+from app.models import Repository, Branch, File, Issue, IssueComment, PullRequest, Collaborator, User, Commit
+from app.schemas import (RepositoryCreate, RepositoryUpdate, RepositoryResponse,
                      BranchCreate, BranchResponse, CommitCreate, CommitResponse,
                      CollaboratorAdd, CollaboratorResponse, FileChange, FileResponse,
                      IssueCommentCreate, IssueCommentResponse, IssueCreate, IssueResponse,
                      IssueUpdate, PullRequestCreate, PullRequestResponse, PullRequestUpdate,
                     )
-from auth import get_current_user, verify_csrf, limiter
+from app.auth import get_current_user, verify_csrf, limiter
 
 router = APIRouter(prefix="/repos", tags=["repositories"])
 
@@ -122,7 +122,7 @@ def _get_commit(repo_id: int, commit_id: int, db: Session) -> Commit:
     Raises exception if no commit has been found
     """
     commit = db.query(Commit).filter(
-        Commit.repository_id == repo_id,
+        Commit.repo_id == repo_id,
         Commit.id == commit_id
     ).first()
     if not commit:
@@ -139,7 +139,7 @@ def get_latest_commit(repo_id: int, branch_id: int, db: Session) -> Union[Commit
     Raises exception if no commit has been found
     """
     commit = db.query(Commit).filter(
-        Commit.repository_id == repo_id,
+        Commit.repo_id == repo_id,
         Commit.branch_id == branch_id
         ).order_by(Commit.created_at.desc()).first()
     
@@ -151,19 +151,19 @@ def copy_commits(source_branch: Branch, target_branch: Branch, db: Session):
     latest_commit_target = get_latest_commit(repo_id, target_branch.id, db)
 
     source_commits = db.query(Commit).filter(
-        Commit.repository_id == repo_id,
+        Commit.repo_id == repo_id,
         Commit.branch_id == source_branch.id,
     ).order_by(Commit.created_at.asc(), Commit.id.asc()).all()
     
     for commit in source_commits:
         new_commit = Commit(
-            repository_id = repo_id,
+            repo_id = repo_id,
             branch_id=target_branch.id,
             message=commit.message,
             author_id=commit.author_id,
             parent_commit_id=latest_commit_target.id if latest_commit_target else None,
-            created_at=datetime.utcnow(),
-            commit_hash=generate_commit_hash(commit.message, commit.author_id, datetime.utcnow())
+            created_at=datetime.datetime.now(datetime.UTC),
+            commit_hash=generate_commit_hash(commit.message, commit.author_id, datetime.datetime.now(datetime.UTC))
         )
         db.add(new_commit)
         latest_commit_target = new_commit
@@ -381,7 +381,7 @@ def update_repository(repo_id: int, repo_data: RepositoryUpdate,
         get_branch(repo_id, db, name=repo_data.default_branch)
         repo.default_branch = repo_data.default_branch
     
-    repo.updated_at = datetime.utcnow()
+    repo.updated_at = datetime.datetime.now(datetime.UTC)
     
     db.commit()
     db.refresh(repo)
@@ -496,7 +496,7 @@ def create_commit(repo_id: int,
                   db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
     check_repo_access(repo, user, "write", db)
-    commit_hash = generate_commit_hash(commit_data.message, user.id, datetime.utcnow())
+    commit_hash = generate_commit_hash(commit_data.message, user.id, datetime.datetime.now(datetime.UTC))
     # Verify branch exists
     get_branch(repo_id, db, branch_id=commit_data.branch_id)
     last_commit = get_latest_commit(repo_id, commit_data.branch_id, db)
@@ -504,7 +504,7 @@ def create_commit(repo_id: int,
     commit = Commit(
         message = commit_data.message,
         author_id = user.id,
-        repository_id = repo_id,
+        repo_id = repo_id,
         branch_id = commit_data.branch_id,
         parent_commit_id = last_commit.id if last_commit else None,
         commit_hash = commit_hash,
@@ -551,12 +551,12 @@ def list_commits(repo_id: int, branch_id: Optional[int],
     
     if branch_id:
         commits = db.query(Commit).filter(
-            Commit.repository_id == repo_id,
+            Commit.repo_id == repo_id,
             Commit.branch_id == branch_id
         ).order_by(Commit.created_at.desc()).all()
     else:
         commits = db.query(Commit).filter(
-            Commit.repository_id == repo_id
+            Commit.repo_id == repo_id
         ).order_by(Commit.created_at.desc()).all()
     
     return commits
@@ -609,7 +609,7 @@ def create_issue(repo_id: int, issue_data: IssueCreate,
     return issue
 
 @router.get("/{repo_id}/issues", response_model=List[IssueResponse])
-def list_issues(repo_id: int, status: Optional[str],
+def list_issues(repo_id: int, status: Optional[str] = None,
                 user: User = Depends(get_current_user),
                 db: Session = Depends(get_db)):
     repo = get_repo(repo_id, db)
@@ -640,7 +640,7 @@ def update_issue(repo_id: int, issue_id: int,
         
     if issue_data.status is not None:
         if issue_data.status == "closed":
-            issue.closed_at = datetime.utcnow()
+            issue.closed_at = datetime.datetime.now(datetime.UTC)
         issue.status = issue_data.status
     
     if issue_data.assigned_to_id is not None:
@@ -719,7 +719,7 @@ def merge_pull_request(repo_id: int, pr_id: int,
     copy_commits(source_branch, target_branch, db)
     
     pr.status = "merged"
-    pr.merged_at = datetime.utcnow()
+    pr.merged_at = datetime.datetime.now(datetime.UTC)
     
     db.commit()
     db.refresh(pr)

@@ -1,19 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.orm import Session
 from jose import jwt
-from datetime import datetime, timedelta
+import datetime
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import secrets 
 import re
 
-from database import get_db
-from models import User, LoginAttempt, RevokedToken
-from schemas import UserCreate, UserResponse, UserLogin
-from password import get_password_hash, verify_password
-from jwt import create_access_token, create_refresh_token, SECRET_KEY, ALGORITHM
-from config import settings
+from app.database import get_db
+from app.models import User, LoginAttempt, RevokedToken
+from app.schemas import UserCreate, UserResponse, UserLogin
+from app.password import get_password_hash, verify_password
+from app.jwt import create_access_token, create_refresh_token, SECRET_KEY, ALGORITHM
+from app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 SECURE_COOKIES = settings.SECURE_COOKIES
@@ -72,7 +72,7 @@ def verify_csrf_token(token: str, session_id: str) -> bool:
 
 def check_account_lockout(username: str, db: Session) -> None:
     """Check if account is locked due to too many failed attempts."""
-    cutoff_time = datetime.utcnow() - timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+    cutoff_time = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=LOCKOUT_DURATION_MINUTES)
     
     failed_attempts = db.query(LoginAttempt).filter(
         LoginAttempt.username == username,
@@ -92,14 +92,14 @@ def record_login_attempt(username: str, success: bool, ip_address: str, db: Sess
         username=username,
         success=success,
         ip_address=ip_address,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.datetime.now(datetime.UTC)
     )
     db.add(attempt)
     db.commit()
     
 def cleanup_old_login_attempts(db: Session) -> None:
     """Clean up login attempts older than lockout duration."""
-    cutoff_time = datetime.utcnow() - timedelta(minutes=LOCKOUT_DURATION_MINUTES)
+    cutoff_time = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=LOCKOUT_DURATION_MINUTES)
     db.query(LoginAttempt).filter(LoginAttempt.timestamp < cutoff_time).delete()
     db.commit()
     
@@ -111,7 +111,7 @@ def revoke_token(jti: str, expires_at: datetime, db: Session) -> None:
     """Add token to revocation list"""
     revoked = RevokedToken(
         jti=jti,
-        revoked_at=datetime.utcnow(),
+        revoked_at=datetime.datetime.now(datetime.UTC),
         expires_at=expires_at
     )
     db.add(revoked)
@@ -119,7 +119,7 @@ def revoke_token(jti: str, expires_at: datetime, db: Session) -> None:
     
 def cleanup_expired_tokens(db: Session) -> None:
     """Remove expired tokens from revocation list"""
-    db.query(RevokedToken).filter(RevokedToken.expires_at < datetime.utcnow()).delete()
+    db.query(RevokedToken).filter(RevokedToken.expires_at < datetime.datetime.now(datetime.UTC)).delete()
     db.commit()
     
 @router.post("/register", response_model=UserResponse)
@@ -159,7 +159,7 @@ def register_user(request: Request, user: UserCreate, db: Session = Depends(get_
     return new_user
 
 @router.post("/login")
-@limiter.limit("15/minute")
+@limiter.limit("100/hour")
 def login(request: Request, response: Response, credentials: UserLogin, db: Session = Depends(get_db)):
     "Login to the site"
     

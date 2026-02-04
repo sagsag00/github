@@ -7,3 +7,5 @@ env/
 node_modules/
 *.log
 .env
+test.db
+.pytest_cache
