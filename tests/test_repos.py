@@ -9,7 +9,7 @@ from app.database import Base, get_db
 from app.models import User, Repository, Branch, Commit, File, Issue, IssueComment, PullRequest, Collaborator
 from app.password import get_password_hash
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+SQLALCHEMY_DATABASE_URL = "sqlite:///./data/test.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
