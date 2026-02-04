@@ -378,3 +378,25 @@ def verify_csrf(request: Request):
             detail="Invalid CSRF token"
         )
     return True
+
+@router.get("/protected")
+def protected_route(user = Depends(get_current_user)):
+    return {
+        "message": "Welcome home",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+    }
+    
+@router.post("/protected/action")
+def protected_action(
+    request: Request,
+    csrf_valid: bool = Depends(verify_csrf),
+    user: User = Depends(get_current_user)
+):
+    return {
+        "message": "Action completed successfully",
+        "user": user.username
+    }

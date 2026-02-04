@@ -597,7 +597,6 @@ class TestCollaboratorEndpoints:
             },
             headers=fresh_headers
         )
-        print(f"response: {response.text}")
         assert response.status_code == 200
         
         response = client.get(f"/repos/{test_private_repo.id}/collaborators", headers=fresh_headers)

@@ -1,334 +1,276 @@
-"""
-Security testing script for the authentication system.
-Tests various securit features including rate limiting, account lockout,
-CSRF protection and password strength validation.
-"""
-
-import requests
+import pytest
+from fastapi.testclient import TestClient
 import time
-from typing import Dict, Any
 
-BASE_URL = "http://localhost:8000"
+from app.main import app
+from app.database import Base, get_db
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base.metadata.create_all(bind=engine)
+
+def override_get_db():
+    try:
+        db = TestingSessionLocal()
+        yield db
+    finally:
+        db.close()
+
+app.dependency_overrides[get_db] = override_get_db
+client = TestClient(app)
+
 MAX_LOGIN_ATTEMPTS = 15
 
-def test_password_strength():
-    print("\n=== Testing Password Strength Validation ===")
+
+@pytest.fixture(scope="function")
+def db_session():
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = TestingSessionLocal()
+    yield db
+    db.close()
+
+
+class TestPasswordStrength:
     
-    weak_passwords = [
-        ("short1!", "Too short"),
-        ("nouppercase123!", "No uppercase"),
-        ("NOLOWERCASE123!", "No lowercase"),
-        ("NoDigits!", "No digits"),
-        ("NoSpecial123", "No special characters"),
-    ]
+    def test_weak_passwords_rejected(self, db_session):
+        weak_passwords = [
+            ("short1!", "Too short"),
+            ("nouppercase123!", "No uppercase"),
+            ("NOLOWERCASE123!", "No lowercase"),
+            ("NoDigits!", "No digits"),
+            ("NoSpecial123", "No special characters"),
+        ]
+        
+        for password, reason in weak_passwords:
+            response = client.post(
+                "/auth/register",
+                json={
+                    "username": f"test_{time.time()}",
+                    "email": f"test_{time.time()}@example.com",
+                    "password": password
+                }
+            )
+            assert response.status_code == 400, f"Should reject weak password: {reason}"
     
-    for password, reason in weak_passwords:
-        response = requests.post(
-            f"{BASE_URL}/auth/register",
+    def test_strong_password_accepted(self, db_session):
+        response = client.post(
+            "/auth/register",
             json={
-                "username": f"test_{time.time()}",
-                "email": f"test_{time.time()}@example.com",
+                "username": f"stronguser_{time.time()}",
+                "email": f"strong_{time.time()}@example.com",
+                "password": "StrongPass123!",
+            }
+        )
+        assert response.status_code in [200, 201], "Should accept strong password"
+
+
+class TestRateLimiting:
+    
+    def test_login_rate_limiting(self, db_session):
+        for i in range(16):
+            response = client.post(
+                "/auth/login",
+                json={
+                    "username": "testuser",
+                    "password": "wrongpassword"
+                }
+            )
+            
+            if i < 15:
+                assert response.status_code in [401, 404], f"Attempt {i+1} should be processed"
+            else:
+                assert response.status_code == 429, f"Attempt {i+1} should be rate limited"
+
+
+class TestAccountLockout:
+    
+    def test_lockout_after_failed_attempts(self, db_session):
+        username = f"locktest_{time.time()}"
+        password = "CorrectPass123!"
+        
+        response = client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
                 "password": password
             }
         )
-        print(f"Testing weak password ({reason}): {response.status_code}")
-        assert response.status_code == 400, f"Should reject weak password: {reason}"
+        assert response.status_code in [200, 201], "User registration should succeed"
         
-    response = requests.post(
-        f"{BASE_URL}/auth/register",
-        json={
-            "username": f"stronuser_{time.time()}",
-            "email": f"string_{time.time()}@example.com",
-            "password": "StrongPass123!",
-        }
-    )
-    print(f"Testing strong password: {response.status_code}")
-    assert response.status_code in [200, 201], "Should accept strong password"
-    
-    print("Password strength validation working correctly")
-    
-def test_rate_limiting():
-    """Test rate limiting on login endpoint."""
-    print("\n=== Testing Rate Limiting ===")
-    
-    for i in range(16):
-        response = requests.post(
-            f"{BASE_URL}/auth/login",
-            json={
-                "username": "testuser",
-                "password": "wrongpassword"
-            }
-        )
-        print(f"Login attempt {i+1}: {response.status_code}")
+        for i in range(MAX_LOGIN_ATTEMPTS + 1):
+            time.sleep(0.1)
+            response = client.post(
+                "/auth/login",
+                json={
+                    "username": username,
+                    "password": "WrongPassword123!"
+                }
+            )
+            
+            if i < MAX_LOGIN_ATTEMPTS:
+                assert response.status_code == 401, f"Attempt {i+1} should return 401"
+            else:
+                assert response.status_code == 429, f"Attempt {i+1} should be locked (429)"
         
-        if i < 15:
-            assert response.status_code in [401, 404], f"Attempt {i+1} should be processed"
-        else:
-            assert response.status_code == 429, f"Attempt {i+1} should be rate limited"
-    print("Rate limiting working correctly")
-    
-def test_account_lockout():
-    """Test account lockout after failed login attempts."""
-    print("\n === Testing Account Lockout ===")
-    
-    username = f"locktest_{time.time()}"
-    password = f"CorrectPass123!"
-    
-    response = requests.post(
-        f"{BASE_URL}/auth/register",
-        json={
-            "username": username,
-            "email": f"{username}@example.com",
-            "password": password
-        }
-    )
-    print(f"User registed: {response.status_code}")
-    
-    for i in range(MAX_LOGIN_ATTEMPTS + 1):
-        time.sleep(0.1)
-        response = requests.post(
-            f"{BASE_URL}/auth/login",
+        response = client.post(
+            "/auth/login",
             json={
                 "username": username,
-                "password": "WrongPassword123!"
+                "password": password
             }
         )
-        print(f"Failed attempt {i+1}: {response.status_code}")
+        assert response.status_code == 429, "Should be locked even with correct password"
+
+
+class TestCSRFProtection:
+    
+    def test_csrf_token_required(self, db_session):
+        username = f"csrftest_{time.time()}"
+        password = "TestPass123!"
         
-        if i < MAX_LOGIN_ATTEMPTS:
-            assert response.status_code == 401, f"Attempt {i+1} should return 401"
-        else:
-            assert response.status_code == 429, f"Attempt {i+1} should be locked (429)"
-            
-    response = requests.post(
-        f"{BASE_URL}/auth/login",
-        json={
-            "username": username,
-            "password": password
-        }
-    )
-    print(f"Correct password while locked: {response.status_code}")
-    assert response.status_code == 429, "Should be locked even with correct password"
-    
-    print("Account lockout working correctly")
-    
-def test_csrf_protection():
-    """Test CSRF protection on logout endpoint."""
-    print("\n === Testing CSRF Protection ===")
-    
-    username = f"csrftest_{time.time()}"
-    password = "TestPass123!"
-    
-    requests.post(
-        f"{BASE_URL}/auth/register",
-        json={
-            "username": username,
-            "email": f"{username}@example.com",
-            "password": password
-        }
-    )
-    
-    login_response = requests.post(
-        f"{BASE_URL}/auth/login",
-        json={
-            "username": username,
-            "password": password
-        }
-    )
-    
-    cookies = login_response.cookies
-    csrf_token = login_response.json().get("csrf_token")
-    
-    print(f"Login successful, CSRF token received: {bool(csrf_token)}")
-    
-    response = requests.post(
-        f"{BASE_URL}/auth/logout",
-        cookies=cookies
-    )
-    
-    print(f"Logout with invalid CSRF token: {response.status_code}")
-    assert response.status_code == 403, "Should reject invalid CSRF token"
-    
-    response = requests.post(
-        f"{BASE_URL}/auth/logout",
-        cookies=cookies,
-        headers={"X-CSRF-Token": csrf_token}
-    )
-    print(f"Logout with valid CSRF token: {response.status_code}")
-    assert response.status_code == 200, "Should accept valid CSRF token"
-    
-    print("CSRF protection working correctly")
-    
-def test_token_revocation():
-    """Test token revocation on logout"""
-    print("\n === Testing Token Revocation")
-    
-    username = f"revoketest_{time.time()}"
-    password = "TestPass123!"
-    
-    requests.post(
-        f"{BASE_URL}/auth/register",
-        json={
-            "username": username,
-            "email": f"{username}@example.com",
-            "password": password
-        }
-    )
-    
-    login_response = requests.post(
-        f"{BASE_URL}/auth/login",
-        json={
-            "username": username,
-            "password": password
-        }
-    )
-    
-    cookies = login_response.cookies
-    csrf_token = login_response.json().get("csrf_token")
-    
-    response = requests.get(
-        f"{BASE_URL}/protected",
-        cookies=cookies
-    )
-    print(f"Access protected route before logout: {response.status_code}")
-    assert response.status_code == 200, "Should access protected route"
-    
-    requests.post(
-        f"{BASE_URL}/auth/logout",
-        cookies=cookies,
-        headers={"X-CSRF-Token": csrf_token}
-    )
-    
-    response = requests.get(
-        f"{BASE_URL}/protected",
-        cookies=cookies
-    )
-    
-    print(f"Access protected route after logout: {response.status_code}")
-    assert response.status_code == 401, "Should reject revoked token"
-    
-    print("Token revocation working correctly")
-    
-def test_complete_flow():
-    """Test complete authentication flow."""
-    print("\n=== Testing Complete Authentication Flow ===")
-    
-    username = f"flowtest_{time.time()}"
-    email = f"{username}@example.com"
-    password = "FlowTest123!"
-    
-    # 1. Register
-    response = requests.post(
-        f"{BASE_URL}/auth/register",
-        json={
-            "username": username,
-            "email": email,
-            "password": password
-        }
-    )
-    print(f"1. Register: {response.status_code}")
-    assert response.status_code in [200, 201]
-    
-    # 2. Login
-    response = requests.post(
-        f"{BASE_URL}/auth/login",
-        json={
-            "username": username,
-            "password": password
-        }
-    )
-    print(f"2. Login: {response.status_code}")
-    assert response.status_code == 200
-    
-    cookies = response.cookies
-    csrf_token = response.json().get("csrf_token")
-    
-    # 3. Access protected route
-    response = requests.get(
-        f"{BASE_URL}/protected",
-        cookies=cookies
-    )
-    print(f"3. Access protected route: {response.status_code}")
-    assert response.status_code == 200
-    
-    # 4. Refresh token
-    response = requests.post(
-        f"{BASE_URL}/auth/refresh",
-        cookies=cookies
-    )
-    print(f"4. Refresh token: {response.status_code}")
-    assert response.status_code == 200
-    
-    # Update cookies with new access token
-    if response.cookies:
-        cookies.update(response.cookies)
-    
-    # 5. Access protected route again
-    response = requests.get(
-        f"{BASE_URL}/protected",
-        cookies=cookies
-    )
-    print(f"5. Access protected route after refresh: {response.status_code}")
-    assert response.status_code == 200
-    
-    # 6. Logout
-    response = requests.post(
-        f"{BASE_URL}/auth/logout",
-        cookies=cookies,
-        headers={"X-CSRF-Token": csrf_token}
-    )
-    print(f"6. Logout: {response.status_code}")
-    assert response.status_code == 200
-    
-    # 7. Try to access protected route after logout
-    response = requests.get(
-        f"{BASE_URL}/protected",
-        cookies=cookies
-    )
-    print(f"7. Access protected route after logout: {response.status_code}")
-    assert response.status_code == 401
-    
-    print("Complete authentication flow working correctly")
-    
-def main():
-    """Run all security tests."""
-    print("=" * 60)
-    print("AUTHENTICATION SYSTEM SECURITY TESTS")
-    print("=" * 60)
-    print("\nMake sure the server is running at http://localhost:8000")
-    print("Press Enter to continue or Ctrl+C to cancel...")
-    input()
-    
-    try:
-        test_password_strength()
-        time.sleep(1)
+        client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": password
+            }
+        )
         
-        test_complete_flow()
-        time.sleep(1)
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": username,
+                "password": password
+            }
+        )
         
-        #test_rate_limiting()
-        # test_account_lockout()
-        print("\n Note: Skipping rate limiting and account lockout tests")
-        print("Run them manually to avoid interference")
+        csrf_token = login_response.json().get("csrf_token")
         
-        test_csrf_protection()
-        time.sleep(1)
+        assert csrf_token is not None, "CSRF token should be returned"
         
-        test_token_revocation()
+        response = client.post("/auth/logout")
+        assert response.status_code == 403, "Should reject request without CSRF token"
+    
+    def test_csrf_token_accepted(self, db_session):
+        username = f"csrftest2_{time.time()}"
+        password = "TestPass123!"
         
-        print("\n" + "=" * 60)
-        print("ALL TESTS PASSED")
-        print("=" * 60)
-    except AssertionError as e:
-        print(f"\nTEST FAILED: {e}")
-        return 1
-    except requests.exceptions.ConnectionError:
-        print("\nERROR: Cannot connect to server. Make sure it's running at http://localhost:8000")
-        return 1
-    except Exception as e:
-        print(f"\nUNEXPECTED ERROR: {e}")
-        return 1
-    return 0
+        client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": password
+            }
+        )
+        
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": username,
+                "password": password
+            }
+        )
+        
+        csrf_token = login_response.json().get("csrf_token")
+        
+        response = client.post(
+            "/auth/logout",
+            headers={"X-CSRF-Token": csrf_token}
+        )
+        assert response.status_code == 200, "Should accept valid CSRF token"
+
+
+class TestTokenRevocation:
+    
+    def test_token_revoked_on_logout(self, db_session):
+        username = f"revoketest_{time.time()}"
+        password = "TestPass123!"
+        
+        client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": f"{username}@example.com",
+                "password": password
+            }
+        )
+        
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": username,
+                "password": password
+            }
+        )
+        
+        csrf_token = login_response.json().get("csrf_token")
+        
+        response = client.get("/auth/protected")
+        assert response.status_code == 200, "Should access protected route before logout"
+        
+        client.post(
+            "/auth/logout",
+            headers={"X-CSRF-Token": csrf_token}
+        )
+        
+        response = client.get("/auth/protected")
+        assert response.status_code == 401, "Should reject revoked token"
+
+
+class TestCompleteAuthFlow:
+    
+    def test_full_authentication_flow(self, db_session):
+        username = f"flowtest_{time.time()}"
+        email = f"{username}@example.com"
+        password = "FlowTest123!"
+        
+        response = client.post(
+            "/auth/register",
+            json={
+                "username": username,
+                "email": email,
+                "password": password
+            }
+        )
+        assert response.status_code in [200, 201]
+        
+        response = client.post(
+            "/auth/login",
+            json={
+                "username": username,
+                "password": password
+            }
+        )
+        assert response.status_code == 200
+        
+        csrf_token = response.json().get("csrf_token")
+        
+        response = client.get("/auth/protected")
+        assert response.status_code == 200
+        
+        response = client.post("/auth/refresh")
+        assert response.status_code == 200
+        
+        response = client.get("/auth/protected")
+        assert response.status_code == 200
+        
+        response = client.post(
+            "/auth/logout",
+            headers={"X-CSRF-Token": csrf_token}
+        )
+        assert response.status_code == 200
+        
+        response = client.get("/auth/protected")
+        assert response.status_code == 401
+
 
 if __name__ == "__main__":
-    exit(main())
+    pytest.main([__file__, "-v", "-m", "not slow"])
